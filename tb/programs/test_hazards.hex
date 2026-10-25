@@ -1,0 +1,34 @@
+// ============================================================================
+// File: test_hazards.hex
+// Description: RV32I Test Program in 32-bit Hex words for $readmemh.
+// Test coverage:
+//   - EX->EX & MEM->EX data forwarding
+//   - Load-Use hazard 1-cycle stall
+//   - Branch Not-Taken sequential continuation
+//   - Branch Taken control hazard flush
+//   - JAL jump & link redirection
+//   - L1 D-Cache store and load
+//   - Pass criteria: Register x10 == 32'd42 (0x0000002A) & x11 == 32'd42
+// ============================================================================
+@00000000
+00a00093 // 0x00: ADDI x1, x0, 10
+01400113 // 0x04: ADDI x2, x0, 20
+002081b3 // 0x08: ADD  x3, x1, x2       (x3 = 30; EX->EX forwarding)
+40118233 // 0x0C: SUB  x4, x3, x1       (x4 = 20; EX->EX & MEM->EX forwarding)
+003262b3 // 0x10: OR   x5, x4, x3       (x5 = 30; EX->EX & MEM->EX forwarding)
+00001337 // 0x14: LUI  x6, 1            (x6 = 0x00001000)
+00532023 // 0x18: SW   x5, 0(x6)        (Store 30 at 0x1000 into L1 cache)
+00032383 // 0x1C: LW   x7, 0(x6)        (Load from 0x1000 -> x7 = 30)
+00c38413 // 0x20: ADDI x8, x7, 12       (LOAD-USE STALL! x8 = 30 + 12 = 42)
+00208863 // 0x24: BEQ  x1, x2, +16      (10 == 20: False, Not Taken)
+00100493 // 0x28: ADDI x9, x0, 1        (Executed: x9 = 1)
+00209663 // 0x2C: BNE  x1, x2, +12      (10 != 20: True, Taken -> jump to 0x38)
+00000413 // 0x30: ADDI x8, x0, 0        (Must be flushed!)
+00000413 // 0x34: ADDI x8, x0, 0        (Must be flushed!)
+00c000ef // 0x38: JAL  x1, +12          (JAL to 0x44, link x1 = 0x3C)
+00000413 // 0x3C: ADDI x8, x0, 0        (Must be flushed!)
+00000413 // 0x40: ADDI x8, x0, 0        (Must be flushed!)
+00040513 // 0x44: ADDI x10, x8, 0       (x10 = x8 = 42! Return signature)
+00a32223 // 0x48: SW   x10, 4(x6)       (Store 42 at 0x1004)
+00432583 // 0x4C: LW   x11, 4(x6)       (Load 42 into x11 from L1 cache hit)
+0000006f // 0x50: JAL  x0, 0            (HALT / Infinite loop)

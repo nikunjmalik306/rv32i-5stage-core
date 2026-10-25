@@ -1,0 +1,12 @@
+# Build and simulation artifacts
+sim/*.vvp
+sim/*.vcd
+sim/*.out
+sim/rv32i_core_synth.v
+sim/obj_dir/
+sim/programs/
+
+# OS specific
+.DS_Store
+*.swp
+*~

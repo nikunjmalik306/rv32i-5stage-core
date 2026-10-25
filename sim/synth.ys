@@ -1,0 +1,52 @@
+# ==============================================================================
+# File: synth.ys
+# Description: Yosys Open-Source Synthesis and RTL Optimization Script for RV32I
+# ==============================================================================
+
+# Read SystemVerilog files in proper dependency order
+read_verilog -sv ../rtl/core/rv32i_types_pkg.sv
+read_verilog -sv ../rtl/core/branch_predictor.sv
+read_verilog -sv ../rtl/core/stage_if.sv
+read_verilog -sv ../rtl/core/pipe_reg_if_id.sv
+read_verilog -sv ../rtl/core/stage_id.sv
+read_verilog -sv ../rtl/core/pipe_reg_id_ex.sv
+read_verilog -sv ../rtl/core/stage_ex.sv
+read_verilog -sv ../rtl/core/hazard_unit.sv
+read_verilog -sv ../rtl/core/pipe_reg_ex_mem.sv
+read_verilog -sv ../rtl/core/stage_mem.sv
+read_verilog -sv ../rtl/core/pipe_reg_mem_wb.sv
+read_verilog -sv ../rtl/core/stage_wb.sv
+read_verilog -sv ../rtl/bus/axi4_lite_master.sv
+read_verilog -sv ../rtl/cache/l1_dcache.sv
+read_verilog -sv ../rtl/core/rv32i_core.sv
+
+# Elaborate design hierarchy
+hierarchy -check -top rv32i_core
+
+# High-level synthesis and optimization passes
+proc
+opt_expr
+opt_clean
+check
+opt
+
+# Extract and optimize finite state machines
+fsm
+opt
+
+# Memory mapping and word-level optimizations
+memory -nomap
+opt
+wreduce
+opt
+
+# Technology mapping to generic standard cell primitives
+techmap
+opt
+
+# Final cleanup and statistics report
+clean
+stat -top rv32i_core
+
+# Write synthesized gate-level Verilog netlist
+write_verilog -noattr rv32i_core_synth.v
