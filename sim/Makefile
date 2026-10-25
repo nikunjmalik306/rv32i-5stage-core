@@ -98,7 +98,7 @@ wave:
 	@if [ -f "$(VCD_FILE)" ]; then \
 		echo "==> Opening $(VCD_FILE) in GTKWave..."; \
 		if open -Ra "gtkwave" 2>/dev/null; then \
-			open -a gtkwave $(VCD_FILE); \
+			gtkwave $(VCD_FILE); \
 		else \
 			gtkwave $(VCD_FILE) & \
 		fi; \
