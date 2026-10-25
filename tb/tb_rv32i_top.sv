@@ -59,13 +59,18 @@ module tb_rv32i_top;
   wire        m_axi_rready;
 
   wire        dcache_error;
+  wire        trap_taken;
+  wire [31:0] trap_cause;
+  wire [31:0] trap_epc;
+  wire [31:0] trap_val;
   wire        dbg_wb_valid;
   wire [4:0]  dbg_wb_rd;
   wire [31:0] dbg_wb_data;
 
   // DUT Instance
   rv32i_core #(
-    .RESET_VECTOR(32'h0000_0000)
+    .RESET_VECTOR(32'h0000_0000),
+    .TRAP_VECTOR (32'h0000_01E0)
   ) dut (
     .clk          (clk),
     .rst_n        (rst_n),
@@ -91,6 +96,10 @@ module tb_rv32i_top;
     .m_axi_rresp  (m_axi_rresp),
     .m_axi_rvalid (m_axi_rvalid),
     .m_axi_rready (m_axi_rready),
+    .trap_taken   (trap_taken),
+    .trap_cause   (trap_cause),
+    .trap_epc     (trap_epc),
+    .trap_val     (trap_val),
     .dcache_error (dcache_error),
     .dbg_wb_valid (dbg_wb_valid),
     .dbg_wb_rd    (dbg_wb_rd),
@@ -114,6 +123,10 @@ module tb_rv32i_top;
 
   function automatic [31:0] enc_lw(logic [4:0] rd, logic [4:0] rs1, logic [11:0] imm);
     return {imm, rs1, 3'b010, rd, 7'b0000011};
+  endfunction
+
+  function automatic [31:0] enc_jalr(logic [4:0] rd, logic [4:0] rs1, logic [11:0] imm);
+    return {imm, rs1, 3'b000, rd, 7'b1100111};
   endfunction
 
   task automatic assemble_test_suites();
@@ -140,10 +153,10 @@ module tb_rv32i_top;
 
     // Suite 3A: Refill Error Injection (SLVERR on Word 3)
     rom_memory[pc++] = enc_lui(29, 20'h00008);   // LUI x29, 8 (0x8000)
-    rom_memory[pc++] = enc_lw(30, 29, 12'h0);     // LW x30, 0(x29) -> Refill with SLVERR
-    rom_memory[pc++] = enc_addi(24, 0, 12'h4);    // ADDI x24, x0, 4 (Checkpoint 3A)
+    rom_memory[pc++] = enc_lw(30, 29, 12'h0);     // LW x30, 0(x29) at PC 0x138 -> Refill with SLVERR!
+    rom_memory[pc++] = enc_addi(30, 0, 12'h999);  // ADDI x30, x0, 0x999 (Must be flushed on trap!)
 
-    // Suite 3B: Eviction Error Injection & Dirty-Data Preservation
+    // Suite 3B: Eviction Error Injection & Dirty-Data Preservation (starts at PC 0x140, index 80)
     rom_memory[pc++] = enc_lui(25, 20'h00009);   // LUI x25, 9 (0x9000)
     rom_memory[pc++] = enc_lui(26, 20'hDEADC);   // LUI x26, 0xDEADC
     rom_memory[pc++] = enc_addi(26, 26, 12'hEEF);// ADDI x26, x26, -273 -> x26 = 0xDEADBEEF
@@ -155,6 +168,13 @@ module tb_rv32i_top;
     rom_memory[pc++] = enc_addi(24, 0, 12'h5);    // ADDI x24, x0, 5 (Checkpoint 3B)
 
     rom_memory[pc++] = 32'h0000006f;             // JAL x0, 0
+
+    // Architectural Trap Handler Vector at TRAP_VECTOR (0x1E0, word index 120):
+    // 1. Sets x24 = 4 (Signals Checkpoint 3A: Trap Taken & Trap Handler Executed)
+    // 2. Safely resumes execution at Suite 3B (PC 0x140)
+    rom_memory[120] = enc_addi(24, 0, 12'h4);     // ADDI x24, x0, 4 (Checkpoint 3A via trap handler)
+    rom_memory[121] = enc_addi(19, 0, 12'h140);   // ADDI x19, x0, 0x140 (Suite 3B target)
+    rom_memory[122] = enc_jalr(0, 19, 12'h0);     // JALR x0, x19, 0 -> Return from trap into Suite 3B
   endtask
 
   initial begin
@@ -489,6 +509,23 @@ module tb_rv32i_top;
 
         // Wait for dcache_error trap or cache error state
         while (dcache_error !== 1'b1) @(posedge clk);
+
+        // Assert Architectural Exception Properties
+        if (trap_taken !== 1'b1) begin
+          $fatal(1, "[ASSERTION FAILED] Architectural trap_taken not asserted on bus error!");
+        end
+        if (trap_cause !== 32'd5) begin
+          $fatal(1, "[ASSERTION FAILED] Trap cause mismatch! Got: %0d (Expected: 5 CAUSE_LOAD_ACCESS_FAULT)", trap_cause);
+        end
+        if (trap_epc !== 32'h0000_0138) begin
+          $fatal(1, "[ASSERTION FAILED] Trap EPC mismatch! Got: 0x%08h (Expected: 0x00000138)", trap_epc);
+        end
+        if (trap_val !== 32'h0000_8000) begin
+          $fatal(1, "[ASSERTION FAILED] Trap faulting address mismatch! Got: 0x%08h (Expected: 0x00008000)", trap_val);
+        end
+        $display("    [PASSED] Architectural exception raised: trap_taken=1, trap_cause=5 (LOAD_ACCESS_FAULT).");
+        $display("    [PASSED] Exception PC: 0x%08h | Faulting Address: 0x%08h", trap_epc, trap_val);
+
         @(posedge clk);
         // Verify victim line is not validated when error occurs
         if (dut.u_l1_dcache.valid_array[0][0] == 1'b1 && dut.u_l1_dcache.tag_array[0][0] == (32'h8000 >> 11)) begin
@@ -500,8 +537,18 @@ module tb_rv32i_top;
         $display("    [PASSED] D-Cache asserted cpu_error (dcache_error = 1); fault propagated to CPU.");
         $display("    [PASSED] Corrupted line remains INVALID (no corruption in cache array).");
         inject_read_error = 0; // Clear error to allow recovery
+
+        // Wait for Trap Handler at TRAP_VECTOR (0x1E0) to set Checkpoint 3A (x24 == 4)
         while (shadow_regfile[24] != 32'd4) @(posedge clk);
-        repeat (10) @(posedge clk);
+        repeat (5) @(posedge clk);
+
+        // Verify Architectural Register Preservation: x30 was NEVER overwritten with corrupted data or 0x999
+        if (shadow_regfile[30] === 32'd999) begin
+          $fatal(1, "[ASSERTION FAILED] Speculative instruction after fault was erroneously committed! x30=999");
+        end
+        $display("    [PASSED] Speculative instruction flushed; destination register x30 protected (no data corruption).");
+        $display("    [PASSED] CPU redirected to TRAP_VECTOR (0x1E0) and safely resumed execution at Suite 3B.");
+        repeat (5) @(posedge clk);
 
         // Sub-test 3B: Eviction Writeback Error at Word 7 & Dirty Preservation
         inject_write_error = 1;

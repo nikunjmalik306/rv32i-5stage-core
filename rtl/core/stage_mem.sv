@@ -25,6 +25,7 @@ module stage_mem (
   output logic [31:0] dcache_wdata,
   output logic [3:0]  dcache_wstrb,
   input  logic [31:0] dcache_rdata,
+  input  logic        dcache_error,
 
   // Outputs to MEM/WB Pipeline Register
   output logic        mem_out_reg_write,
@@ -126,7 +127,7 @@ module stage_mem (
   end
 
   // Outputs
-  assign mem_out_reg_write  = mem_reg_write;
+  assign mem_out_reg_write  = mem_reg_write && !dcache_error;
   assign mem_out_mem_to_reg = mem_mem_to_reg;
   assign mem_out_read_data  = formatted_load_data;
   assign mem_out_alu_result = mem_alu_result;

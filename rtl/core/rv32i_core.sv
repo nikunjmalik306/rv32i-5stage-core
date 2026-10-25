@@ -9,7 +9,8 @@
 `timescale 1ns / 1ps
 
 module rv32i_core #(
-  parameter logic [31:0] RESET_VECTOR = 32'h0000_0000
+  parameter logic [31:0] RESET_VECTOR = 32'h0000_0000,
+  parameter logic [31:0] TRAP_VECTOR  = 32'h0000_0004
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -48,6 +49,12 @@ module rv32i_core #(
   input  logic [1:0]  m_axi_rresp,
   input  logic        m_axi_rvalid,
   output logic        m_axi_rready,
+
+  // Architectural Exception / Trap Interface
+  output logic        trap_taken,
+  output logic [31:0] trap_cause,
+  output logic [31:0] trap_epc,
+  output logic [31:0] trap_val,
 
   // Trace & Verification Interface
   output logic        dcache_error,
@@ -139,6 +146,7 @@ module rv32i_core #(
   logic [31:0] mem_alu_result;
   logic [31:0] mem_store_data;
   logic [4:0]  mem_rd;
+  logic [31:0] mem_pc;
 
   logic        dcache_req;
   logic        dcache_we;
@@ -147,6 +155,19 @@ module rv32i_core #(
   logic [3:0]  dcache_wstrb;
   logic [31:0] dcache_rdata;
   logic        dcache_stall;
+
+  logic        trap_redirect_en;
+  logic [31:0] trap_redirect_pc;
+
+  // Architectural Trap Generation for Memory Access Faults
+  wire is_mem_fault = dcache_error && (mem_mem_read || mem_mem_write);
+  assign trap_taken       = is_mem_fault;
+  assign trap_cause       = mem_mem_read ? rv32i_types_pkg::CAUSE_LOAD_ACCESS_FAULT :
+                                           rv32i_types_pkg::CAUSE_STORE_ACCESS_FAULT;
+  assign trap_epc         = mem_pc;
+  assign trap_val         = dcache_addr;
+  assign trap_redirect_en = is_mem_fault;
+  assign trap_redirect_pc = TRAP_VECTOR;
 
   logic        mem_out_reg_write;
   logic        mem_out_mem_to_reg;
@@ -209,11 +230,13 @@ module rv32i_core #(
   stage_if #(
     .RESET_VECTOR(RESET_VECTOR)
   ) u_stage_if (
-    .clk           (clk),
-    .rst_n         (rst_n),
-    .stall_pc      (stall_if),
-    .ex_redirect_en(ex_redirect_en),
-    .ex_redirect_pc(ex_redirect_pc),
+    .clk             (clk),
+    .rst_n           (rst_n),
+    .stall_pc        (stall_if),
+    .trap_redirect_en(trap_redirect_en),
+    .trap_redirect_pc(trap_redirect_pc),
+    .ex_redirect_en  (ex_redirect_en),
+    .ex_redirect_pc  (ex_redirect_pc),
     .bp_pred_taken (bp_pred_taken),
     .bp_pred_target(bp_pred_target),
     .imem_addr     (imem_addr),
@@ -381,6 +404,7 @@ module rv32i_core #(
     .if_id_rs1       (id_rs1),
     .if_id_rs2       (id_rs2),
     .ex_redirect_en  (ex_redirect_en),
+    .trap_taken      (trap_taken),
     .dcache_stall    (dcache_stall),
     .fwd_a_sel       (fwd_a_sel),
     .fwd_b_sel       (fwd_b_sel),
@@ -408,6 +432,7 @@ module rv32i_core #(
     .ex_alu_result (ex_out_alu_result),
     .ex_store_data (ex_out_store_data),
     .ex_rd         (ex_out_rd),
+    .ex_pc         (ex_pc),
     .mem_reg_write (mem_reg_write),
     .mem_mem_to_reg(mem_mem_to_reg),
     .mem_mem_read  (mem_mem_read),
@@ -415,7 +440,8 @@ module rv32i_core #(
     .mem_mem_width (mem_mem_width),
     .mem_alu_result(mem_alu_result),
     .mem_store_data(mem_store_data),
-    .mem_rd        (mem_rd)
+    .mem_rd        (mem_rd),
+    .mem_pc        (mem_pc)
   );
 
   // 9. MEM Stage
@@ -434,6 +460,7 @@ module rv32i_core #(
     .dcache_wdata      (dcache_wdata),
     .dcache_wstrb      (dcache_wstrb),
     .dcache_rdata      (dcache_rdata),
+    .dcache_error      (dcache_error),
     .mem_out_reg_write (mem_out_reg_write),
     .mem_out_mem_to_reg(mem_out_mem_to_reg),
     .mem_out_read_data (mem_out_read_data),

@@ -23,6 +23,7 @@ module pipe_reg_ex_mem (
   input  logic [31:0] ex_alu_result,
   input  logic [31:0] ex_store_data,
   input  logic [4:0]  ex_rd,
+  input  logic [31:0] ex_pc,
 
   // Outputs to MEM Stage
   output logic        mem_reg_write,
@@ -32,7 +33,8 @@ module pipe_reg_ex_mem (
   output logic [2:0]  mem_mem_width,
   output logic [31:0] mem_alu_result,
   output logic [31:0] mem_store_data,
-  output logic [4:0]  mem_rd
+  output logic [4:0]  mem_rd,
+  output logic [31:0] mem_pc
 );
 
   always_ff @(posedge clk or negedge rst_n) begin
@@ -45,6 +47,7 @@ module pipe_reg_ex_mem (
       mem_alu_result <= 32'h0000_0000;
       mem_store_data <= 32'h0000_0000;
       mem_rd         <= 5'd0;
+      mem_pc         <= 32'h0000_0000;
     end else if (flush) begin
       mem_reg_write  <= 1'b0;
       mem_mem_to_reg <= 1'b0;
@@ -54,6 +57,7 @@ module pipe_reg_ex_mem (
       mem_alu_result <= 32'h0000_0000;
       mem_store_data <= 32'h0000_0000;
       mem_rd         <= 5'd0;
+      mem_pc         <= 32'h0000_0000;
     end else if (!stall) begin
       mem_reg_write  <= ex_reg_write;
       mem_mem_to_reg <= ex_mem_to_reg;
@@ -63,6 +67,7 @@ module pipe_reg_ex_mem (
       mem_alu_result <= ex_alu_result;
       mem_store_data <= ex_store_data;
       mem_rd         <= ex_rd;
+      mem_pc         <= ex_pc;
     end
   end
 

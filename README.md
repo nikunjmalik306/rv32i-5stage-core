@@ -34,20 +34,28 @@ Verified with automated multi-suite self-checking testbenches and synthesizable 
 ```
 
 ### Architectural & Verification Upgrades
-1. **Dirty-Data Preservation on Eviction Failure (`S_EVICT_ERR`)**:
+1. **Precise Architectural Exception Handling**:
+   - Implements synchronous exception traps on memory bus faults (`SLVERR`/`DECERR`):
+     - `trap_taken`: Asserts precise trap on faulting memory load/store instruction.
+     - `trap_cause`: Standard RISC-V synchronous exception code (`5` for `CAUSE_LOAD_ACCESS_FAULT`, `7` for `CAUSE_STORE_ACCESS_FAULT`).
+     - `trap_epc`: Captures exact PC of the faulting instruction.
+     - `trap_val`: Captures faulting memory byte address (`dcache_addr`).
+   - **Architectural State Protection**: Suppresses destination register writeback (`mem_out_reg_write = mem_reg_write && !dcache_error`), preventing invalid data from corrupting the register file.
+   - **Pipeline Purge & Vector Redirection**: Flushes speculative younger instructions in `IF/ID`, `ID/EX`, and `EX/MEM`, and redirects PC to parameterizable `TRAP_VECTOR` (default `0x000001E0`).
+2. **Dirty-Data Preservation on Eviction Failure (`S_EVICT_ERR`)**:
    - If an AXI4-Lite dirty writeback encounters a bus fault (`SLVERR` / `DECERR`), the victim cache line is **NEVER invalidated or cleared**.
    - Modified data and dirty bits remain strictly preserved in the cache array to prevent silent data loss.
    - Core receives `dcache_error` notification to trap and handle the bus exception safely.
-2. **Refill Fault Containment (`S_REFILL_ERR`)**:
+3. **Refill Fault Containment (`S_REFILL_ERR`)**:
    - If a line refill receives a bus error, the line is marked invalid (`valid_array = 0`) so unverified or corrupted memory data is never served to the core.
-3. **Decoupled AXI4-Lite AW & W Channels**:
+4. **Decoupled AXI4-Lite AW & W Channels**:
    - Write Address (`AW`) and Write Data (`W`) channels operate concurrently with independent handshake tracking (`aw_done`, `w_done`).
    - Interoperates with `AW-first`, `W-first`, and `simultaneous` slave handshake profiles without deadlock.
-4. **Tightly Coupled Cache/Bridge Handshake**:
+5. **Tightly Coupled Cache/Bridge Handshake**:
    - Cache burst word counters advance strictly on individual word acceptance (`cmd_valid && cmd_ready`) followed by verified response capture (`rsp_valid`).
    - Guarantees each word in a 32-byte cache line is issued and consumed exactly once.
-5. **Multi-Suite Directed Regression**:
-   - Covers full RISC-V RV32I ISA, RAW forwarding, 1-cycle load-use stalls, branch taken/not-taken, conflict misses with 32-byte dirty writebacks, AW-first/W-first handshake ordering, and word-level SLVERR fault injection.
+6. **Multi-Suite Directed Regression**:
+   - Covers full RISC-V RV32I ISA, RAW forwarding, 1-cycle load-use stalls, branch taken/not-taken, conflict misses with 32-byte dirty writebacks, AW-first/W-first handshake ordering, and word-level SLVERR fault injection with precise architectural trap assertions.
 
 ---
 
@@ -149,10 +157,16 @@ Executed on macOS with **Icarus Verilog** and **GTKWave**:
  [SUITE 3] DIRECTED BUS FAULT INJECTION & RECOVERY TESTS         
 ==================================================================
 >>> [TEST 3A] Injecting SLVERR during Cache Refill at Burst Word 3...
-    [PASSED] Cache detected SLVERR on word 3; line remains INVALID (no corruption).
+    [PASSED] Architectural exception raised: trap_taken=1, trap_cause=5 (LOAD_ACCESS_FAULT).
+    [PASSED] Exception PC: 0x00000138 | Faulting Address: 0x00008000
+    [PASSED] D-Cache asserted cpu_error (dcache_error = 1); fault propagated to CPU.
+    [PASSED] Corrupted line remains INVALID (no corruption in cache array).
+    [PASSED] Speculative instruction flushed; destination register x30 protected (no data corruption).
+    [PASSED] CPU redirected to TRAP_VECTOR (0x1E0) and safely resumed execution at Suite 3B.
 >>> [TEST 3B] Injecting SLVERR during Dirty Writeback at Burst Word 7...
+    [PASSED] D-Cache asserted cpu_error (dcache_error = 1); fault propagated to CPU.
     [PASSED] Cache entered S_EVICT_ERR; DIRTY line and data PRESERVED in cache!
-    [PASSED] Zero data loss on failed eviction writeback.
+    [PASSED] Zero data loss on failed eviction writeback (cache_data = 0xDEADBEEF).
 
 ##################################################################
 ###                 ALL 3 TEST SUITES PASSED!                  ###

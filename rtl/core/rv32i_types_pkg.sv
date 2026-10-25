@@ -72,6 +72,12 @@ package rv32i_types_pkg;
   localparam logic [1:0] BHT_STRONGLY_TAKEN     = 2'b11;
 
   // --------------------------------------------------------------------------
+  // RISC-V Synchronous Exception Causes (mcause[31]=0)
+  // --------------------------------------------------------------------------
+  localparam logic [31:0] CAUSE_LOAD_ACCESS_FAULT  = 32'd5;
+  localparam logic [31:0] CAUSE_STORE_ACCESS_FAULT = 32'd7;
+
+  // --------------------------------------------------------------------------
   // NOP Instruction Constant (addi x0, x0, 0)
   // --------------------------------------------------------------------------
   localparam logic [31:0] RV32I_NOP = 32'h00000013;

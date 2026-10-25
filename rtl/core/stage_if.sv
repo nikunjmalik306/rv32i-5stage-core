@@ -15,6 +15,8 @@ module stage_if #(
 
   // Stall & Redirect Controls
   input  logic        stall_pc,
+  input  logic        trap_redirect_en,
+  input  logic [31:0] trap_redirect_pc,
   input  logic        ex_redirect_en,
   input  logic [31:0] ex_redirect_pc,
 
@@ -43,7 +45,9 @@ module stage_if #(
   assign if_pc_plus4 = pc_reg + 32'd4;
 
   always_comb begin
-    if (ex_redirect_en) begin
+    if (trap_redirect_en) begin
+      next_pc = trap_redirect_pc;
+    end else if (ex_redirect_en) begin
       next_pc = ex_redirect_pc;
     end else if (bp_pred_taken) begin
       next_pc = bp_pred_target;

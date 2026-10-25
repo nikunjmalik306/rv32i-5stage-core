@@ -27,6 +27,7 @@ module hazard_unit (
 
   // Control Hazard Inputs
   input  logic        ex_redirect_en,
+  input  logic        trap_taken,
 
   // Memory/Cache Stall Inputs
   input  logic        dcache_stall,
@@ -92,7 +93,11 @@ module hazard_unit (
     flush_id_ex  = 1'b0;
     flush_ex_mem = 1'b0;
 
-    if (dcache_stall) begin
+    if (trap_taken) begin
+      flush_if_id  = 1'b1;
+      flush_id_ex  = 1'b1;
+      flush_ex_mem = 1'b1;
+    end else if (dcache_stall) begin
       stall_if  = 1'b1;
       stall_id  = 1'b1;
       stall_ex  = 1'b1;
