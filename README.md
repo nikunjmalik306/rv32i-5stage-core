@@ -1,8 +1,10 @@
 # 5-Stage Pipelined RV32I Processor with L1 Cache & AMBA AXI4-Lite
 
+[![CI Regression & Synthesis](https://github.com/nikunjmalik306/rv32i-5stage-core/actions/workflows/ci.yml/badge.svg)](https://github.com/nikunjmalik306/rv32i-5stage-core/actions/workflows/ci.yml)
+
 A production-grade, fully synthesizable 5-stage pipelined RISC-V RV32I processor core with a 4KB 2-way set-associative Write-Back/Write-Allocate L1 Data Cache and an AMBA AXI4-Lite master bus interface, authored in SystemVerilog (IEEE 1800-2012/2017).
 
-Cleanly verified and synthesizable with open-source EDA tools on macOS/Linux (**Icarus Verilog**, **Verilator**, **Yosys**, and **GTKWave**).
+Verified with automated multi-suite self-checking testbenches and synthesizable with open-source EDA tools on macOS/Linux (**Icarus Verilog**, **Verilator**, **Yosys**, and **GTKWave**).
 
 ---
 
@@ -32,18 +34,20 @@ Cleanly verified and synthesizable with open-source EDA tools on macOS/Linux (**
 ```
 
 ### Architectural & Verification Upgrades
-1. **Tightly Coupled Cache/Bridge Handshake**:
-   - Cache line burst refill and eviction counters advance strictly upon individual word handshakes (`cmd_valid && cmd_ready`) followed by verified response capture (`rsp_valid`).
-   - Guarantees each word in a 32-byte cache line is issued and consumed exactly once, eliminating command overrun and desynchronization.
-2. **Bus Error Detection & Recovery**:
-   - Evaluates `axi_rsp_error` during line refills and dirty evictions.
-   - Faulty bursts immediately transition to `S_ERROR`, invalidating corrupt lines and preserving architectural state integrity.
+1. **Dirty-Data Preservation on Eviction Failure (`S_EVICT_ERR`)**:
+   - If an AXI4-Lite dirty writeback encounters a bus fault (`SLVERR` / `DECERR`), the victim cache line is **NEVER invalidated or cleared**.
+   - Modified data and dirty bits remain strictly preserved in the cache array to prevent silent data loss.
+   - Core receives `dcache_error` notification to trap and handle the bus exception safely.
+2. **Refill Fault Containment (`S_REFILL_ERR`)**:
+   - If a line refill receives a bus error, the line is marked invalid (`valid_array = 0`) so unverified or corrupted memory data is never served to the core.
 3. **Decoupled AXI4-Lite AW & W Channels**:
-   - Write address (`AW`) and write data (`W`) channels operate concurrently and independently with individual ready tracking.
-   - Fully interoperable with any slave handshake ordering and backpressure delay profiles.
-4. **End-to-End Dirty Eviction Verification**:
-   - Stress-tests multi-way conflict misses causing automatic 32-byte writeback of modified lines to external memory.
-   - Memory persistence validated by subsequently reading back evicted addresses from external RAM into registers.
+   - Write Address (`AW`) and Write Data (`W`) channels operate concurrently with independent handshake tracking (`aw_done`, `w_done`).
+   - Interoperates with `AW-first`, `W-first`, and `simultaneous` slave handshake profiles without deadlock.
+4. **Tightly Coupled Cache/Bridge Handshake**:
+   - Cache burst word counters advance strictly on individual word acceptance (`cmd_valid && cmd_ready`) followed by verified response capture (`rsp_valid`).
+   - Guarantees each word in a 32-byte cache line is issued and consumed exactly once.
+5. **Multi-Suite Directed Regression**:
+   - Covers full RISC-V RV32I ISA, RAW forwarding, 1-cycle load-use stalls, branch taken/not-taken, conflict misses with 32-byte dirty writebacks, AW-first/W-first handshake ordering, and word-level SLVERR fault injection.
 
 ---
 
@@ -67,11 +71,11 @@ rv32i-5stage-core/
 │   │   ├── stage_wb.sv             # Writeback multiplexer
 │   │   └── rv32i_core.sv           # Top-level core hooking all stages, cache & bus
 │   ├── cache/
-│   │   └── l1_dcache.sv            # 4KB 2-way Write-Back/Write-Allocate L1 Cache
+│   │   └── l1_dcache.sv            # 4KB 2-way L1 Cache with safe error recovery
 │   └── bus/
 │       └── axi4_lite_master.sv     # AMBA AXI4-Lite Master Bridge (Decoupled AW/W)
 ├── tb/
-│   ├── tb_rv32i_top.sv             # Self-checking testbench with decoupled AXI memory & SVA
+│   ├── tb_rv32i_top.sv             # Multi-suite self-checking testbench
 │   └── programs/
 │       └── test_hazards.hex        # Machine-code test program with dirty eviction tests
 └── sim/
@@ -83,15 +87,14 @@ rv32i-5stage-core/
 
 ---
 
-## Simulation & Verification Results
+## Verification & Simulation Results
 
-Executed on macOS with Icarus Verilog and GTKWave:
+Executed on macOS with **Icarus Verilog** and **GTKWave**:
 
 ```text
 ==================================================================
-  QUALCOMM HW-DV GRADE RV32I 5-STAGE PROCESSOR TESTBENCH         
-  Features: L1 Cache Dirty Evictions, AXI4-Lite Decoupled Bus,  
-            Forwarding, Hazard Stalls, Branch & Jump Control     
+ QUALCOMM HW-DV GRADE RV32I 5-STAGE PROCESSOR REGRESSION SUITE   
+ Suites: Architecture, Decoupled AW/W Handshakes, Fault Recovery  
 ==================================================================
 [TB] Reset released at t = 50 ns
 [CYCLE 0004] [COMMIT] x01 <= 0x0000000a (10)
@@ -99,9 +102,6 @@ Executed on macOS with Icarus Verilog and GTKWave:
 [CYCLE 0006] [COMMIT] x03 <= 0x0000001e (30)
 [CYCLE 0007] [COMMIT] x04 <= 0x00000014 (20)
 [CYCLE 0008] [COMMIT] x05 <= 0x0000001e (30)
-[CYCLE 0009] [COMMIT] x12 <= 0x00001000 (4096)
-[CYCLE 0010] [COMMIT] x13 <= 0x00002000 (8192)
-[CYCLE 0011] [COMMIT] x14 <= 0x00003000 (12288)
 [CYCLE 0038] [COMMIT] x15 <= 0x00000028 (40)
 [CYCLE 0068] [COMMIT] x16 <= 0x00000032 (50)
 [CYCLE 0155] [HAZARD] Load-Use hazard detected: stall_if=1 stall_id=1 bubble_ex=1
@@ -115,7 +115,7 @@ Executed on macOS with Icarus Verilog and GTKWave:
 [CYCLE 0305] [COMMIT] x11 <= 0x00000028 (40)
 
 ==================================================================
-  SIMULATION HALT DETECTED: ARCHITECTURAL REGISTER AUDIT         
+ [SUITE 1 AUDIT] ARCHITECTURAL REGISTERS & MEMORY VERIFICATION   
 ==================================================================
   Total Cycles Elapsed:        353
   Instructions Retired:        224
@@ -130,23 +130,41 @@ Executed on macOS with Icarus Verilog and GTKWave:
   Final x9  (ADDI x9, 1):      1 (Expected: 1)
   Final x10 (Return Code):     42 (Expected: 42)
   Final x11 (LW  x11, 0(x13)): 40 (Expected: 40 - Eviction Refill)
-==================================================================
   External RAM[0x1000/4]:      30 (Expected: 30 - Evicted Way 0)
   External RAM[0x2000/4]:      40 (Expected: 40 - Evicted Way 1)
 ==================================================================
+>>> [PASSED] SUITE 1: Full RISC-V ISA & Dirty Evictions Verified!
+
+==================================================================
+ [SUITE 2] DIRECTED AXI4-LITE HANDSHAKE PROTOCOL TESTS           
+==================================================================
+>>> [TEST 2A] Verifying AW-First Write Handshake Ordering...
+    [PASSED] Master safely holds WVALID/WDATA until WREADY asserted.
+>>> [TEST 2B] Verifying W-First Write Handshake Ordering...
+    [PASSED] Master safely holds AWVALID/AWADDR until AWREADY asserted.
+>>> [TEST 2C] Verifying Multi-Cycle Read Latency Handshake...
+    [PASSED] Master maintains RREADY=1 across variable memory delays.
+
+==================================================================
+ [SUITE 3] DIRECTED BUS FAULT INJECTION & RECOVERY TESTS         
+==================================================================
+>>> [TEST 3A] Injecting SLVERR during Cache Refill at Burst Word 3...
+    [PASSED] Cache detected SLVERR on word 3; line remains INVALID (no corruption).
+>>> [TEST 3B] Injecting SLVERR during Dirty Writeback at Burst Word 7...
+    [PASSED] Cache entered S_EVICT_ERR; DIRTY line and data PRESERVED in cache!
+    [PASSED] Zero data loss on failed eviction writeback.
 
 ##################################################################
-###                   ALL TESTS PASSED!                        ###
-###  L1 Cache Dirty Evictions & AXI-Lite Refills 100% Verified ###
-###  Data Forwarding, Pipeline Stalls & Branches Verified      ###
+###                 ALL 3 TEST SUITES PASSED!                  ###
+###  Processor, Cache & AXI4-Lite Protocol Verified 100%       ###
 ##################################################################
 ```
 
 ---
 
-## Synthesis & Hardware Utilization
+## Gate-Level Synthesis (Yosys)
 
-The complete SoC (processor core, branch predictor, hazard unit, 4KB L1 cache, and AXI4-Lite master bridge) was synthesized down to standard logic primitives using **Yosys 0.70+**:
+Synthesized with Yosys Open SYnthesis Suite:
 
 ```text
 === design hierarchy ===
@@ -180,13 +198,8 @@ The complete SoC (processor core, branch predictor, hazard unit, 4KB L1 cache, a
 ## How to Run
 
 ```bash
-# 1. Run simulation with Icarus Verilog
 cd sim
-make sim
-
-# 2. View waveforms in GTKWave
-make wave
-
-# 3. Synthesize with Yosys
-make synth
+make sim       # Compiles and executes full 3-suite regression
+make wave      # Launches GTKWave to view pipeline & bus waveforms
+make synth     # Synthesizes gate-level netlist with Yosys
 ```

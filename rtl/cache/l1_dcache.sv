@@ -6,8 +6,13 @@
 // Key Enhancements:
 //   - Tightly coupled command issuance (cmd_valid && cmd_ready) and response
 //     consumption (rsp_valid) for deterministic single-issue-per-word bursts.
-//   - Bus error detection and recovery (axi_rsp_error tracking) preventing
-//     corrupt line validation on bus SLVERR / DECERR.
+//   - Dirty-Data Preservation on Eviction Failure: If an eviction writeback
+//     encounters a bus error (SLVERR/DECERR), the modified victim line is
+//     NEVER invalidated or cleared. Dirty state and modified data are strictly
+//     preserved in cache to avoid silent data loss.
+//   - Refill Failure Protection: If refill encounters a bus error, the line
+//     remains invalid so corrupt data is never served.
+//   - Explicit CPU Error Reporting: cpu_error asserted on any bus transaction failure.
 //
 // Cache Geometry:
 //   - Total Capacity: 4096 Bytes (4 KB)
@@ -32,6 +37,7 @@ module l1_dcache (
   input  logic [3:0]  cpu_wstrb,      // Byte write strobes
   output logic [31:0] cpu_rdata,      // Read data output
   output logic        cpu_stall,      // Pipeline stall while handling miss
+  output logic        cpu_error,      // Bus error trap / fault notification
 
   // AXI4-Lite Master Bridge Interface
   output logic        axi_cmd_valid,
@@ -88,7 +94,8 @@ module l1_dcache (
     S_REFILL      = 3'b011,
     S_UPDATE      = 3'b100,
     S_RESP        = 3'b101,
-    S_ERROR       = 3'b110
+    S_EVICT_ERR   = 3'b110,
+    S_REFILL_ERR  = 3'b111
   } cache_state_e;
 
   cache_state_e state, next_state;
@@ -231,8 +238,17 @@ module l1_dcache (
           // Single cycle to let CPU sample newly loaded/stored rdata
         end
 
-        S_ERROR: begin
-          // Bus error recovery: invalidate cache line to avoid serving corrupt data
+        S_EVICT_ERR: begin
+          // CRITICAL SAFETY POLICY:
+          // A dirty eviction writeback failed. To prevent silent data loss,
+          // DO NOT clear or invalidate the victim line!
+          // The line remains valid_array=1 and dirty_array=1 with intact data.
+          bus_error <= 1'b0;
+        end
+
+        S_REFILL_ERR: begin
+          // Refill failed: incoming data was corrupted or bus returned SLVERR/DECERR.
+          // Keep line invalid so unverified/corrupt data is never marked valid.
           valid_array[victim_way][reg_set_idx] <= 1'b0;
           dirty_array[victim_way][reg_set_idx] <= 1'b0;
           bus_error <= 1'b0;
@@ -267,7 +283,7 @@ module l1_dcache (
       S_EVICT: begin
         if (word_issued && axi_rsp_valid && (burst_cnt == 3'd7)) begin
           if (bus_error || axi_rsp_error) begin
-            next_state = S_ERROR;
+            next_state = S_EVICT_ERR;
           end else begin
             next_state = S_REFILL;
           end
@@ -277,7 +293,7 @@ module l1_dcache (
       S_REFILL: begin
         if (word_issued && axi_rsp_valid && (burst_cnt == 3'd7)) begin
           if (bus_error || axi_rsp_error) begin
-            next_state = S_ERROR;
+            next_state = S_REFILL_ERR;
           end else begin
             next_state = S_UPDATE;
           end
@@ -292,7 +308,11 @@ module l1_dcache (
         next_state = S_IDLE;
       end
 
-      S_ERROR: begin
+      S_EVICT_ERR: begin
+        next_state = S_IDLE;
+      end
+
+      S_REFILL_ERR: begin
         next_state = S_IDLE;
       end
 
@@ -341,6 +361,7 @@ module l1_dcache (
   // CPU Output Interface
   // --------------------------------------------------------------------------
   assign cpu_stall = (state != S_IDLE) || (cpu_req && !cache_hit);
+  assign cpu_error = (state == S_EVICT_ERR) || (state == S_REFILL_ERR);
 
   always_comb begin
     if (state == S_RESP || state == S_UPDATE) begin

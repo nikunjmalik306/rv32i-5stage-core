@@ -50,6 +50,7 @@ module rv32i_core #(
   output logic        m_axi_rready,
 
   // Trace & Verification Interface
+  output logic        dcache_error,
   output logic        dbg_wb_valid,
   output logic [4:0]  dbg_wb_rd,
   output logic [31:0] dbg_wb_data
@@ -451,6 +452,7 @@ module rv32i_core #(
     .cpu_wstrb    (dcache_wstrb),
     .cpu_rdata    (dcache_rdata),
     .cpu_stall    (dcache_stall),
+    .cpu_error    (dcache_error),
     .axi_cmd_valid(axi_cmd_valid),
     .axi_cmd_write(axi_cmd_write),
     .axi_cmd_addr (axi_cmd_addr),
