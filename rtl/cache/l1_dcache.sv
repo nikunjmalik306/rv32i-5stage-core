@@ -1,7 +1,13 @@
 // ============================================================================
 // File: l1_dcache.sv
 // Description: 4KB 2-Way Set-Associative Write-Back, Write-Allocate L1 Data Cache
-//              with pseudo-LRU replacement and AXI4-Lite burst refill/evict FSM.
+//              with pseudo-LRU replacement and AMBA AXI4-Lite burst refill/evict.
+//
+// Key Enhancements:
+//   - Tightly coupled command issuance (cmd_valid && cmd_ready) and response
+//     consumption (rsp_valid) for deterministic single-issue-per-word bursts.
+//   - Bus error detection and recovery (axi_rsp_error tracking) preventing
+//     corrupt line validation on bus SLVERR / DECERR.
 //
 // Cache Geometry:
 //   - Total Capacity: 4096 Bytes (4 KB)
@@ -81,7 +87,8 @@ module l1_dcache (
     S_EVICT       = 3'b010,
     S_REFILL      = 3'b011,
     S_UPDATE      = 3'b100,
-    S_RESP        = 3'b101
+    S_RESP        = 3'b101,
+    S_ERROR       = 3'b110
   } cache_state_e;
 
   cache_state_e state, next_state;
@@ -92,11 +99,16 @@ module l1_dcache (
   logic        reg_we;
   logic [2:0]  burst_cnt;
   logic        victim_way;
+  logic        word_issued; // Handshake tracking: 1 indicates command was accepted
+  logic        bus_error;   // Latched bus error flag during burst
 
   wire [4:0]  reg_offset   = reg_addr[4:0];
   wire [2:0]  reg_word_idx = reg_offset[4:2];
   wire [5:0]  reg_set_idx  = reg_addr[10:5];
   wire [20:0] reg_tag      = reg_addr[31:11];
+
+  wire [31:0] evict_base_addr  = {tag_array[victim_way][reg_set_idx], reg_set_idx, 5'b00000};
+  wire [31:0] refill_base_addr = {reg_tag, reg_set_idx, 5'b00000};
 
   // --------------------------------------------------------------------------
   // Synchronous State Machine & Cache Array Modifications
@@ -111,6 +123,8 @@ module l1_dcache (
       reg_we      <= 1'b0;
       burst_cnt   <= 3'd0;
       victim_way  <= 1'b0;
+      word_issued <= 1'b0;
+      bus_error   <= 1'b0;
 
       for (s = 0; s < 64; s = s + 1) begin
         valid_array[0][s] <= 1'b0;
@@ -126,7 +140,10 @@ module l1_dcache (
 
       case (state)
         S_IDLE: begin
-          burst_cnt <= 3'd0;
+          burst_cnt   <= 3'd0;
+          word_issued <= 1'b0;
+          bus_error   <= 1'b0;
+
           if (cpu_req) begin
             if (cache_hit) begin
               if (cpu_we) begin
@@ -138,6 +155,7 @@ module l1_dcache (
               end
               lru_array[set_idx] <= ~hit_way;
             end else begin
+              // Register missed request details
               reg_addr   <= cpu_addr;
               reg_wdata  <= cpu_wdata;
               reg_wstrb  <= cpu_wstrb;
@@ -148,11 +166,22 @@ module l1_dcache (
         end
 
         S_CHECK: begin
-          burst_cnt <= 3'd0;
+          burst_cnt   <= 3'd0;
+          word_issued <= 1'b0;
+          bus_error   <= 1'b0;
         end
 
         S_EVICT: begin
-          if (axi_rsp_valid) begin
+          // Track command acceptance
+          if (!word_issued && axi_cmd_valid && axi_cmd_ready) begin
+            word_issued <= 1'b1;
+          end
+
+          // Track response arrival
+          if (word_issued && axi_rsp_valid) begin
+            word_issued <= 1'b0;
+            if (axi_rsp_error) bus_error <= 1'b1;
+
             if (burst_cnt == 3'd7) begin
               burst_cnt <= 3'd0;
             end else begin
@@ -162,8 +191,17 @@ module l1_dcache (
         end
 
         S_REFILL: begin
-          if (axi_rsp_valid) begin
+          // Track command acceptance
+          if (!word_issued && axi_cmd_valid && axi_cmd_ready) begin
+            word_issued <= 1'b1;
+          end
+
+          // Track response arrival and store word
+          if (word_issued && axi_rsp_valid) begin
+            word_issued <= 1'b0;
+            if (axi_rsp_error) bus_error <= 1'b1;
             data_array[victim_way][reg_set_idx][burst_cnt] <= axi_rsp_rdata;
+
             if (burst_cnt == 3'd7) begin
               burst_cnt <= 3'd0;
             end else begin
@@ -190,11 +228,17 @@ module l1_dcache (
         end
 
         S_RESP: begin
+          // Single cycle to let CPU sample newly loaded/stored rdata
         end
 
-        default: begin
-          state <= S_IDLE;
+        S_ERROR: begin
+          // Bus error recovery: invalidate cache line to avoid serving corrupt data
+          valid_array[victim_way][reg_set_idx] <= 1'b0;
+          dirty_array[victim_way][reg_set_idx] <= 1'b0;
+          bus_error <= 1'b0;
         end
+
+        default: state <= S_IDLE;
       endcase
     end
   end
@@ -221,14 +265,22 @@ module l1_dcache (
       end
 
       S_EVICT: begin
-        if (axi_rsp_valid && (burst_cnt == 3'd7)) begin
-          next_state = S_REFILL;
+        if (word_issued && axi_rsp_valid && (burst_cnt == 3'd7)) begin
+          if (bus_error || axi_rsp_error) begin
+            next_state = S_ERROR;
+          end else begin
+            next_state = S_REFILL;
+          end
         end
       end
 
       S_REFILL: begin
-        if (axi_rsp_valid && (burst_cnt == 3'd7)) begin
-          next_state = S_UPDATE;
+        if (word_issued && axi_rsp_valid && (burst_cnt == 3'd7)) begin
+          if (bus_error || axi_rsp_error) begin
+            next_state = S_ERROR;
+          end else begin
+            next_state = S_UPDATE;
+          end
         end
       end
 
@@ -240,16 +292,17 @@ module l1_dcache (
         next_state = S_IDLE;
       end
 
+      S_ERROR: begin
+        next_state = S_IDLE;
+      end
+
       default: next_state = S_IDLE;
     endcase
   end
 
   // --------------------------------------------------------------------------
-  // AXI Master Command Dispatch Logic
+  // AXI Master Command Dispatch Logic: Tightly Qualified
   // --------------------------------------------------------------------------
-  wire [31:0] evict_base_addr = {tag_array[victim_way][reg_set_idx], reg_set_idx, 5'b00000};
-  wire [31:0] refill_base_addr = {reg_tag, reg_set_idx, 5'b00000};
-
   always_comb begin
     axi_cmd_valid = 1'b0;
     axi_cmd_write = 1'b0;
@@ -259,19 +312,25 @@ module l1_dcache (
 
     case (state)
       S_EVICT: begin
-        axi_cmd_valid = 1'b1;
-        axi_cmd_write = 1'b1;
-        axi_cmd_addr  = evict_base_addr | {24'h0, burst_cnt, 2'b00};
-        axi_cmd_wdata = data_array[victim_way][reg_set_idx][burst_cnt];
-        axi_cmd_wstrb = 4'hF;
+        // Only assert cmd_valid if word has not yet been accepted by master bridge
+        if (!word_issued) begin
+          axi_cmd_valid = 1'b1;
+          axi_cmd_write = 1'b1;
+          axi_cmd_addr  = evict_base_addr | {24'h0, burst_cnt, 2'b00};
+          axi_cmd_wdata = data_array[victim_way][reg_set_idx][burst_cnt];
+          axi_cmd_wstrb = 4'hF;
+        end
       end
 
       S_REFILL: begin
-        axi_cmd_valid = 1'b1;
-        axi_cmd_write = 1'b0;
-        axi_cmd_addr  = refill_base_addr | {24'h0, burst_cnt, 2'b00};
-        axi_cmd_wdata = 32'h0;
-        axi_cmd_wstrb = 4'h0;
+        // Only assert cmd_valid if word has not yet been accepted by master bridge
+        if (!word_issued) begin
+          axi_cmd_valid = 1'b1;
+          axi_cmd_write = 1'b0;
+          axi_cmd_addr  = refill_base_addr | {24'h0, burst_cnt, 2'b00};
+          axi_cmd_wdata = 32'h0;
+          axi_cmd_wstrb = 4'h0;
+        end
       end
 
       default: ;

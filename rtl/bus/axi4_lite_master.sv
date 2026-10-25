@@ -2,6 +2,11 @@
 // File: axi4_lite_master.sv
 // Description: AMBA AXI4-Lite Master Bridge interfacing L1 Cache requests
 //              (burst refills and dirty evictions) to an external memory system.
+// Features:
+//   - Independent, concurrent AW and W channels with individual ready tracking
+//   - Compliant with any AXI4-Lite slave handshake ordering
+//   - Zero-latency combinational forwarding of rdata & error during rsp_valid
+//   - Strict error reporting on SLVERR / DECERR
 // Standard: SystemVerilog IEEE 1800-2012 / 1800-2017
 // ============================================================================
 
@@ -18,7 +23,7 @@ module axi4_lite_master (
   input  logic [31:0] cmd_wdata,
   input  logic [3:0]  cmd_wstrb,
   output logic        cmd_ready,      // Master ready to accept new command
-  output logic        rsp_valid,      // Transaction complete
+  output logic        rsp_valid,      // Transaction complete pulse
   output logic [31:0] rsp_rdata,      // Read data returned
   output logic        rsp_error,      // Bus SLVERR / DECERR
 
@@ -60,9 +65,8 @@ module axi4_lite_master (
     AXI_IDLE       = 3'b000,
     AXI_READ_ADDR  = 3'b001,
     AXI_READ_DATA  = 3'b010,
-    AXI_WRITE_ADDR = 3'b011,
-    AXI_WRITE_DATA = 3'b100,
-    AXI_WRITE_RESP = 3'b101
+    AXI_WRITE_DATA = 3'b011, // Concurrent AW & W channels
+    AXI_WRITE_RESP = 3'b100
   } axi_state_e;
 
   axi_state_e state, next_state;
@@ -73,6 +77,10 @@ module axi4_lite_master (
   logic [3:0]  reg_wstrb;
   logic [31:0] reg_rdata;
   logic        reg_error;
+
+  // Handshake completion tracking flags for write channels
+  logic        aw_done;
+  logic        w_done;
 
   // Constant protection attributes: unprivileged, secure, data
   assign m_axi_awprot = 3'b000;
@@ -89,24 +97,43 @@ module axi4_lite_master (
       reg_wstrb <= 4'h0;
       reg_rdata <= 32'h0;
       reg_error <= 1'b0;
+      aw_done   <= 1'b0;
+      w_done    <= 1'b0;
     end else begin
       state <= next_state;
 
-      if (state == AXI_IDLE && cmd_valid) begin
-        reg_addr  <= cmd_addr;
-        reg_wdata <= cmd_wdata;
-        reg_wstrb <= cmd_wstrb;
-        reg_error <= 1'b0;
-      end
+      case (state)
+        AXI_IDLE: begin
+          aw_done   <= 1'b0;
+          w_done    <= 1'b0;
+          reg_error <= 1'b0;
+          if (cmd_valid) begin
+            reg_addr  <= cmd_addr;
+            reg_wdata <= cmd_wdata;
+            reg_wstrb <= cmd_wstrb;
+          end
+        end
 
-      if (state == AXI_READ_DATA && m_axi_rvalid && m_axi_rready) begin
-        reg_rdata <= m_axi_rdata;
-        reg_error <= (m_axi_rresp != 2'b00);
-      end
+        AXI_WRITE_DATA: begin
+          if (m_axi_awvalid && m_axi_awready) aw_done <= 1'b1;
+          if (m_axi_wvalid && m_axi_wready)   w_done  <= 1'b1;
+        end
 
-      if (state == AXI_WRITE_RESP && m_axi_bvalid && m_axi_bready) begin
-        reg_error <= (m_axi_bresp != 2'b00);
-      end
+        AXI_READ_DATA: begin
+          if (m_axi_rvalid && m_axi_rready) begin
+            reg_rdata <= m_axi_rdata;
+            reg_error <= (m_axi_rresp != 2'b00);
+          end
+        end
+
+        AXI_WRITE_RESP: begin
+          if (m_axi_bvalid && m_axi_bready) begin
+            reg_error <= (m_axi_bresp != 2'b00);
+          end
+        end
+
+        default: ;
+      endcase
     end
   end
 
@@ -135,7 +162,7 @@ module axi4_lite_master (
         cmd_ready = 1'b1;
         if (cmd_valid) begin
           if (cmd_write) begin
-            next_state = AXI_WRITE_ADDR;
+            next_state = AXI_WRITE_DATA;
           end else begin
             next_state = AXI_READ_ADDR;
           end
@@ -158,17 +185,14 @@ module axi4_lite_master (
         end
       end
 
-      // Write Transaction Path
-      AXI_WRITE_ADDR: begin
-        m_axi_awvalid = 1'b1;
-        if (m_axi_awready) begin
-          next_state = AXI_WRITE_DATA;
-        end
-      end
-
+      // Write Transaction Path: Independent, Concurrent AW & W channels
       AXI_WRITE_DATA: begin
-        m_axi_wvalid = 1'b1;
-        if (m_axi_wready) begin
+        m_axi_awvalid = !aw_done;
+        m_axi_wvalid  = !w_done;
+
+        // Transition when both handshakes are complete (either simultaneously or sequentially)
+        if ((aw_done || (m_axi_awvalid && m_axi_awready)) &&
+            (w_done  || (m_axi_wvalid  && m_axi_wready))) begin
           next_state = AXI_WRITE_RESP;
         end
       end
@@ -185,7 +209,9 @@ module axi4_lite_master (
     endcase
   end
 
-  assign rsp_rdata = reg_rdata;
-  assign rsp_error = reg_error;
+  // Combinational feed-through ensures rsp_rdata & rsp_error are valid on the exact cycle rsp_valid pulses
+  assign rsp_rdata = (state == AXI_READ_DATA && m_axi_rvalid) ? m_axi_rdata : reg_rdata;
+  assign rsp_error = (state == AXI_READ_DATA && m_axi_rvalid) ? (m_axi_rresp != 2'b00) :
+                     (state == AXI_WRITE_RESP && m_axi_bvalid) ? (m_axi_bresp != 2'b00) : reg_error;
 
 endmodule

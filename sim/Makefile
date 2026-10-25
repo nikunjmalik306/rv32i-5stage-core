@@ -4,7 +4,13 @@
 # Tools supported: Icarus Verilog (iverilog/vvp), Verilator, Yosys, GTKWave.
 # ==============================================================================
 
+SHELL := /bin/bash
 export PATH := /opt/homebrew/bin:$(PATH)
+
+IVERILOG ?= $(shell which iverilog 2>/dev/null || echo /opt/homebrew/bin/iverilog)
+VVP      ?= $(shell which vvp 2>/dev/null || echo /opt/homebrew/bin/vvp)
+YOSYS    ?= $(shell which yosys 2>/dev/null || echo /opt/homebrew/bin/yosys)
+GTKWAVE  ?= $(shell which gtkwave 2>/dev/null || echo /opt/homebrew/bin/gtkwave)
 
 # Directories
 RTL_DIR  = ../rtl
@@ -51,7 +57,6 @@ help:
 	@echo "  RV32I 5-Stage Core Open-Source Build System                    "
 	@echo "=================================================================="
 	@echo "  make sim        : Compile and run simulation with Icarus Verilog"
-	@echo "  make verilator  : Lint and simulate using Verilator C++ model  "
 	@echo "  make synth      : Synthesize RV32I core with Yosys              "
 	@echo "  make wave       : View VCD waveforms in GTKWave (macOS)         "
 	@echo "  make clean      : Remove simulation binaries, waveforms & logs  "
@@ -62,34 +67,22 @@ help:
 # ------------------------------------------------------------------------------
 $(SIM_BIN): $(ALL_SRCS)
 	@echo "==> Compiling SystemVerilog design with Icarus Verilog..."
-	iverilog -g2012 -Wall -I $(CORE_DIR) -I $(TB_DIR) -s tb_rv32i_top -o $(SIM_BIN) $(ALL_SRCS)
+	$(IVERILOG) -g2012 -Wall -I $(CORE_DIR) -I $(TB_DIR) -s tb_rv32i_top -o $(SIM_BIN) $(ALL_SRCS)
 
 sim: $(SIM_BIN)
 	@echo "==> Executing simulation with VVP..."
-	vvp $(SIM_BIN)
+	$(VVP) $(SIM_BIN)
 
 iverilog: sim
-
-# ------------------------------------------------------------------------------
-# Verilator Simulation
-# ------------------------------------------------------------------------------
-verilator:
-	@echo "==> Compiling and Linting with Verilator..."
-	verilator --cc --exe --trace -Wall -Wno-PINMISSING -Wno-MULTIDRIVEN -Wno-CASEOVERLAP \
-		-I$(CORE_DIR) -I$(BUS_DIR) -I$(CACHE_DIR) -I$(TB_DIR) \
-		--top-module tb_rv32i_top \
-		$(ALL_SRCS) sim_main.cpp
-	@echo "==> Building Verilator executable..."
-	$(MAKE) -C obj_dir -f Vtb_rv32i_top.mk Vtb_rv32i_top
-	@echo "==> Running Verilator simulation..."
-	./obj_dir/Vtb_rv32i_top
 
 # ------------------------------------------------------------------------------
 # Yosys Synthesis
 # ------------------------------------------------------------------------------
 synth:
 	@echo "==> Running Yosys open-source synthesis..."
-	yosys -s synth.ys
+	$(YOSYS) -s synth.ys > yosys_synth.log 2>&1
+	@echo "==> Synthesis Complete. Log saved to sim/yosys_synth.log"
+	@grep -A 25 "=== rv32i_core ===" yosys_synth.log || tail -n 35 yosys_synth.log
 
 # ------------------------------------------------------------------------------
 # GTKWave Waveform Viewer (macOS compatible)
@@ -97,11 +90,7 @@ synth:
 wave:
 	@if [ -f "$(VCD_FILE)" ]; then \
 		echo "==> Opening $(VCD_FILE) in GTKWave..."; \
-		if open -Ra "gtkwave" 2>/dev/null; then \
-			gtkwave $(VCD_FILE); \
-		else \
-			gtkwave $(VCD_FILE) & \
-		fi; \
+		$(GTKWAVE) $(VCD_FILE) & \
 	else \
 		echo "ERROR: Waveform file $(VCD_FILE) not found. Run 'make sim' first."; \
 	fi
@@ -111,4 +100,4 @@ wave:
 # ------------------------------------------------------------------------------
 clean:
 	@echo "==> Cleaning generated simulation & synthesis files..."
-	rm -rf $(SIM_BIN) $(VCD_FILE) rv32i_trace_verilator.vcd $(SYNTH_NET) obj_dir
+	rm -rf $(SIM_BIN) $(VCD_FILE) rv32i_trace_verilator.vcd $(SYNTH_NET) yosys_synth.log
