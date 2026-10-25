@@ -99,12 +99,71 @@ module tb_rv32i_top;
 
   // Instruction Memory Model
   logic [31:0] rom_memory [0:1023];
+
+  function automatic [31:0] enc_lui(logic [4:0] rd, logic [19:0] imm);
+    return {imm, rd, 7'b0110111};
+  endfunction
+
+  function automatic [31:0] enc_addi(logic [4:0] rd, logic [4:0] rs1, logic [11:0] imm);
+    return {imm, rs1, 3'b000, rd, 7'b0010011};
+  endfunction
+
+  function automatic [31:0] enc_sw(logic [4:0] rs2, logic [4:0] rs1, logic [11:0] imm);
+    return {imm[11:5], rs2, rs1, 3'b010, imm[4:0], 7'b0100011};
+  endfunction
+
+  function automatic [31:0] enc_lw(logic [4:0] rd, logic [4:0] rs1, logic [11:0] imm);
+    return {imm, rs1, 3'b010, rd, 7'b0000011};
+  endfunction
+
+  task automatic assemble_test_suites();
+    int pc;
+    pc = 64; // PC = 0x100
+    // Suite 2A: AW-First Handshake
+    rom_memory[pc++] = enc_lui(20, 20'h00004);   // LUI x20, 4 (0x4000)
+    rom_memory[pc++] = enc_addi(21, 0, 12'h077);  // ADDI x21, x0, 0x77
+    rom_memory[pc++] = enc_sw(21, 20, 12'h0);     // SW x21, 0(x20)
+    rom_memory[pc++] = enc_lui(22, 20'h00005);   // LUI x22, 5 (0x5000)
+    rom_memory[pc++] = enc_sw(21, 22, 12'h0);     // SW x21, 0(x22)
+    rom_memory[pc++] = enc_lui(23, 20'h00006);   // LUI x23, 6 (0x6000)
+    rom_memory[pc++] = enc_sw(21, 23, 12'h0);     // SW x21, 0(x23) -> Evicts 0x4000 under AW-FIRST!
+    rom_memory[pc++] = enc_addi(24, 0, 12'h1);    // ADDI x24, x0, 1 (Checkpoint 2A)
+
+    // Suite 2B: W-First Handshake
+    rom_memory[pc++] = enc_lui(27, 20'h00007);   // LUI x27, 7 (0x7000)
+    rom_memory[pc++] = enc_sw(21, 27, 12'h0);     // SW x21, 0(x27) -> Evicts 0x5000 under W-FIRST!
+    rom_memory[pc++] = enc_addi(24, 0, 12'h2);    // ADDI x24, x0, 2 (Checkpoint 2B)
+
+    // Suite 2C: Delayed Read Response
+    rom_memory[pc++] = enc_lw(28, 20, 12'h0);     // LW x28, 0(x20) -> Refills 0x4000 with read delay
+    rom_memory[pc++] = enc_addi(24, 0, 12'h3);    // ADDI x24, x0, 3 (Checkpoint 2C)
+
+    // Suite 3A: Refill Error Injection (SLVERR on Word 3)
+    rom_memory[pc++] = enc_lui(29, 20'h00008);   // LUI x29, 8 (0x8000)
+    rom_memory[pc++] = enc_lw(30, 29, 12'h0);     // LW x30, 0(x29) -> Refill with SLVERR
+    rom_memory[pc++] = enc_addi(24, 0, 12'h4);    // ADDI x24, x0, 4 (Checkpoint 3A)
+
+    // Suite 3B: Eviction Error Injection & Dirty-Data Preservation
+    rom_memory[pc++] = enc_lui(25, 20'h00009);   // LUI x25, 9 (0x9000)
+    rom_memory[pc++] = enc_lui(26, 20'hDEADC);   // LUI x26, 0xDEADC
+    rom_memory[pc++] = enc_addi(26, 26, 12'hEEF);// ADDI x26, x26, -273 -> x26 = 0xDEADBEEF
+    rom_memory[pc++] = enc_sw(26, 25, 12'h0);     // SW x26, 0(x25) -> Stores 0xDEADBEEF to 0x9000
+    rom_memory[pc++] = enc_lui(17, 20'h0000A);   // LUI x17, 10 (0xA000)
+    rom_memory[pc++] = enc_sw(21, 17, 12'h0);     // SW x21, 0(x17)
+    rom_memory[pc++] = enc_lui(18, 20'h0000B);   // LUI x18, 11 (0xB000)
+    rom_memory[pc++] = enc_sw(21, 18, 12'h0);     // SW x21, 0(x18) -> Evicts 0x9000 with SLVERR on Word 7!
+    rom_memory[pc++] = enc_addi(24, 0, 12'h5);    // ADDI x24, x0, 5 (Checkpoint 3B)
+
+    rom_memory[pc++] = 32'h0000006f;             // JAL x0, 0
+  endtask
+
   initial begin
     for (int m = 0; m < 1024; m++) rom_memory[m] = 32'h00000013;
     $readmemh("programs/test_hazards.hex", rom_memory);
     if (rom_memory[0] === 32'hxx || rom_memory[0] == 32'h00000013) begin
       $readmemh("../tb/programs/test_hazards.hex", rom_memory);
     end
+    assemble_test_suites();
   end
   assign imem_rdata = rom_memory[imem_addr[11:2]];
 
@@ -137,7 +196,7 @@ module tb_rv32i_top;
     for (int i = 0; i < 16384; i++) axi_ram[i] = 32'h0;
   end
 
-  // Write Channel Handler
+  // Write Channel Handler with Real Cycle Delays
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       m_axi_awready  <= 1'b0;
@@ -153,33 +212,21 @@ module tb_rv32i_top;
       w_wait_cnt     <= 0;
       write_burst_word <= 0;
     end else begin
-      // Configure channel handshake order based on test mode
-      case (slv_mode)
-        MODE_SIMULTANEOUS: begin
-          aw_wait_cnt = 0;
-          w_wait_cnt  = 0;
-        end
-        MODE_AW_FIRST: begin
-          // AW ready immediately, W delayed by 3 cycles
-          aw_wait_cnt = 0;
-          w_wait_cnt  = (w_done_slv) ? 0 : 3;
-        end
-        MODE_W_FIRST: begin
-          // W ready immediately, AW delayed by 3 cycles
-          aw_wait_cnt = (aw_done_slv) ? 0 : 3;
-          w_wait_cnt  = 0;
-        end
-        default: ;
-      endcase
-
       // AW Channel Handshake
       if (!aw_done_slv) begin
         if (m_axi_awvalid) begin
-          m_axi_awready  <= 1'b1;
-          latched_awaddr <= m_axi_awaddr;
-          aw_done_slv    <= 1'b1;
+          if (slv_mode == MODE_W_FIRST && aw_wait_cnt < 3) begin
+            aw_wait_cnt   <= aw_wait_cnt + 1;
+            m_axi_awready <= 1'b0;
+          end else begin
+            m_axi_awready  <= 1'b1;
+            latched_awaddr <= m_axi_awaddr;
+            aw_done_slv    <= 1'b1;
+            aw_wait_cnt    <= 0;
+          end
         end else begin
           m_axi_awready <= 1'b0;
+          aw_wait_cnt   <= 0;
         end
       end else begin
         m_axi_awready <= 1'b0;
@@ -188,12 +235,19 @@ module tb_rv32i_top;
       // W Channel Handshake
       if (!w_done_slv) begin
         if (m_axi_wvalid) begin
-          m_axi_wready  <= 1'b1;
-          latched_wdata <= m_axi_wdata;
-          latched_wstrb <= m_axi_wstrb;
-          w_done_slv    <= 1'b1;
+          if (slv_mode == MODE_AW_FIRST && w_wait_cnt < 3) begin
+            w_wait_cnt   <= w_wait_cnt + 1;
+            m_axi_wready <= 1'b0;
+          end else begin
+            m_axi_wready  <= 1'b1;
+            latched_wdata <= m_axi_wdata;
+            latched_wstrb <= m_axi_wstrb;
+            w_done_slv    <= 1'b1;
+            w_wait_cnt    <= 0;
+          end
         end else begin
           m_axi_wready <= 1'b0;
+          w_wait_cnt   <= 0;
         end
       end else begin
         m_axi_wready <= 1'b0;
@@ -224,7 +278,7 @@ module tb_rv32i_top;
     end
   end
 
-  // Read Channel Handler
+  // Read Channel Handler with Real Cycle Delays
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       m_axi_arready   <= 1'b0;
@@ -236,17 +290,19 @@ module tb_rv32i_top;
       read_burst_word <= 0;
     end else begin
       if (!m_axi_rvalid) begin
-        if (m_axi_arvalid) begin
+        if (m_axi_arvalid && !m_axi_arready && r_delay_cnt == 0 && latched_araddr == 32'h0) begin
           m_axi_arready  <= 1'b1;
           latched_araddr <= m_axi_araddr;
+          r_delay_cnt    <= read_delay_cycles;
         end else begin
           m_axi_arready <= 1'b0;
         end
 
-        if (m_axi_arvalid && m_axi_arready) begin
-          m_axi_arready <= 1'b0;
-          m_axi_rdata   <= axi_ram[m_axi_araddr[15:2]];
-          m_axi_rvalid  <= 1'b1;
+        if (r_delay_cnt > 0) begin
+          r_delay_cnt <= r_delay_cnt - 1;
+        end else if (latched_araddr != 32'h0 && !m_axi_arready) begin
+          m_axi_rdata  <= axi_ram[latched_araddr[15:2]];
+          m_axi_rvalid <= 1'b1;
 
           if (inject_read_error && (read_burst_word == read_error_word)) begin
             m_axi_rresp <= 2'b10; // SLVERR
@@ -255,6 +311,7 @@ module tb_rv32i_top;
             m_axi_rresp <= 2'b00; // OKAY
           end
           read_burst_word <= read_burst_word + 1;
+          latched_araddr  <= 32'h0;
         end
       end else begin
         m_axi_arready <= 1'b0;
@@ -373,7 +430,7 @@ module tb_rv32i_top;
         end
 
         // --------------------------------------------------------------------
-        // TEST SUITE 2: Directed AXI4-Lite Handshake Ordering Tests
+        // TEST SUITE 2: Real AXI4-Lite Directed Handshake Tests
         // --------------------------------------------------------------------
         $display("==================================================================");
         $display(" [SUITE 2] DIRECTED AXI4-LITE HANDSHAKE PROTOCOL TESTS           ");
@@ -381,43 +438,100 @@ module tb_rv32i_top;
 
         // Sub-test 2A: AW-First Handshake
         slv_mode = MODE_AW_FIRST;
-        $display(">>> [TEST 2A] Verifying AW-First Write Handshake Ordering...");
+        $display(">>> [TEST 2A] Executing Real Eviction under AW-First Handshake...");
+        // Vector CPU to Suite 2 at PC 0x100
+        rom_memory[25] = 32'h09c0006f; // JAL x0, 156 (PC 0x64 + 156 = 0x100)
+
+        // Wait for Checkpoint 2A (x24 == 1)
+        while (shadow_regfile[24] != 32'd1) @(posedge clk);
         repeat (10) @(posedge clk);
-        $display("    [PASSED] Master safely holds WVALID/WDATA until WREADY asserted.");
+        if (axi_ram[32'h4000/4] !== 32'h00000077) begin
+          $fatal(1, "[ASSERTION FAILED] Eviction of 0x4000 failed under AW-First! Got: 0x%08h", axi_ram[32'h4000/4]);
+        end
+        $display("    [PASSED] Master safely executed AW-First write handshake; RAM[0x4000/4] = 0x77.");
 
         // Sub-test 2B: W-First Handshake
         slv_mode = MODE_W_FIRST;
-        $display(">>> [TEST 2B] Verifying W-First Write Handshake Ordering...");
+        $display(">>> [TEST 2B] Executing Real Eviction under W-First Handshake...");
+        // Wait for Checkpoint 2B (x24 == 2)
+        while (shadow_regfile[24] != 32'd2) @(posedge clk);
         repeat (10) @(posedge clk);
-        $display("    [PASSED] Master safely holds AWVALID/AWADDR until AWREADY asserted.");
+        if (axi_ram[32'h5000/4] !== 32'h00000077) begin
+          $fatal(1, "[ASSERTION FAILED] Eviction of 0x5000 failed under W-First! Got: 0x%08h", axi_ram[32'h5000/4]);
+        end
+        $display("    [PASSED] Master safely executed W-First write handshake; RAM[0x5000/4] = 0x77.");
 
-        // Sub-test 2C: Delayed Read Response
+        // Sub-test 2C: Delayed Read Response Handshake
         slv_mode = MODE_SIMULTANEOUS;
-        $display(">>> [TEST 2C] Verifying Multi-Cycle Read Latency Handshake...");
+        read_delay_cycles = 4;
+        $display(">>> [TEST 2C] Executing Real Refill with 4-Cycle Read Latency...");
+        // Wait for Checkpoint 2C (x24 == 3)
+        while (shadow_regfile[24] != 32'd3) @(posedge clk);
         repeat (10) @(posedge clk);
-        $display("    [PASSED] Master maintains RREADY=1 across variable memory delays.\n");
+        if (shadow_regfile[28] !== 32'h00000077) begin
+          $fatal(1, "[ASSERTION FAILED] Delayed read refill failed! x28 Got: 0x%08h (Expected: 0x77)", shadow_regfile[28]);
+        end
+        $display("    [PASSED] Master maintained RREADY=1 across variable memory delays; x28 = 0x77.\n");
 
         // --------------------------------------------------------------------
-        // TEST SUITE 3: Fault Injection & Safe Dirty-Data Preservation Tests
+        // TEST SUITE 3: Real Bus Fault Injection & Safe Recovery Tests
         // --------------------------------------------------------------------
         $display("==================================================================");
         $display(" [SUITE 3] DIRECTED BUS FAULT INJECTION & RECOVERY TESTS         ");
         $display("==================================================================");
 
         // Sub-test 3A: Refill Error at Word 3
-        $display(">>> [TEST 3A] Injecting SLVERR during Cache Refill at Burst Word 3...");
+        read_delay_cycles = 0;
         inject_read_error = 1;
         read_error_word   = 3;
-        // Verify victim line is not validated when error occurs
-        $display("    [PASSED] Cache detected SLVERR on word 3; line remains INVALID (no corruption).");
+        read_burst_word   = 0;
+        $display(">>> [TEST 3A] Injecting SLVERR during Cache Refill at Burst Word 3...");
 
-        // Sub-test 3B: Eviction Writeback Error at Word 7
-        $display(">>> [TEST 3B] Injecting SLVERR during Dirty Writeback at Burst Word 7...");
+        // Wait for dcache_error trap or cache error state
+        while (dcache_error !== 1'b1) @(posedge clk);
+        @(posedge clk);
+        // Verify victim line is not validated when error occurs
+        if (dut.u_l1_dcache.valid_array[0][0] == 1'b1 && dut.u_l1_dcache.tag_array[0][0] == (32'h8000 >> 11)) begin
+          $fatal(1, "[ASSERTION FAILED] Corrupted refill line was erroneously validated in Way 0!");
+        end
+        if (dut.u_l1_dcache.valid_array[1][0] == 1'b1 && dut.u_l1_dcache.tag_array[1][0] == (32'h8000 >> 11)) begin
+          $fatal(1, "[ASSERTION FAILED] Corrupted refill line was erroneously validated in Way 1!");
+        end
+        $display("    [PASSED] D-Cache asserted cpu_error (dcache_error = 1); fault propagated to CPU.");
+        $display("    [PASSED] Corrupted line remains INVALID (no corruption in cache array).");
+        inject_read_error = 0; // Clear error to allow recovery
+        while (shadow_regfile[24] != 32'd4) @(posedge clk);
+        repeat (10) @(posedge clk);
+
+        // Sub-test 3B: Eviction Writeback Error at Word 7 & Dirty Preservation
         inject_write_error = 1;
         write_error_word   = 7;
-        // Verify dirty line is NOT cleared on eviction failure
+        write_burst_word   = 0;
+        $display(">>> [TEST 3B] Injecting SLVERR during Dirty Writeback at Burst Word 7...");
+
+        // Wait for dcache_error trap or cache error state
+        while (dcache_error !== 1'b1) @(posedge clk);
+        @(posedge clk);
+        // Verify victim line with 0x9000 (Tag 18) was NOT cleared or invalidated
+        begin
+          int target_way;
+          target_way = (dut.u_l1_dcache.tag_array[1][0] == (32'h9000 >> 11)) ? 1 : 0;
+          if (dut.u_l1_dcache.valid_array[target_way][0] !== 1'b1) begin
+            $fatal(1, "[ASSERTION FAILED] Dirty victim line was erroneously invalidated on failed eviction!");
+          end
+          if (dut.u_l1_dcache.dirty_array[target_way][0] !== 1'b1) begin
+            $fatal(1, "[ASSERTION FAILED] Dirty bit was erroneously cleared on failed eviction!");
+          end
+          if (dut.u_l1_dcache.data_array[target_way][0][0] !== 32'hDEADBEEF) begin
+            $fatal(1, "[ASSERTION FAILED] Modified data in cache was corrupted! Got: 0x%08h", dut.u_l1_dcache.data_array[target_way][0][0]);
+          end
+        end
+        $display("    [PASSED] D-Cache asserted cpu_error (dcache_error = 1); fault propagated to CPU.");
         $display("    [PASSED] Cache entered S_EVICT_ERR; DIRTY line and data PRESERVED in cache!");
-        $display("    [PASSED] Zero data loss on failed eviction writeback.\n");
+        $display("    [PASSED] Zero data loss on failed eviction writeback (cache_data = 0xDEADBEEF).\n");
+        inject_write_error = 0; // Clear error to allow clean recovery
+        while (shadow_regfile[24] != 32'd5) @(posedge clk);
+        repeat (20) @(posedge clk);
 
         $display("##################################################################");
         $display("###                 ALL 3 TEST SUITES PASSED!                  ###");
@@ -427,8 +541,8 @@ module tb_rv32i_top;
       end
 
       begin
-        // Watchdog Timeout (4000 cycles)
-        #(CLK_PERIOD * 4000);
+        // Watchdog Timeout (8000 cycles)
+        #(CLK_PERIOD * 8000);
         $display("\n[FATAL] Simulation Watchdog Timeout reached!");
         $fatal(2, "WATCHDOG_TIMEOUT");
       end
