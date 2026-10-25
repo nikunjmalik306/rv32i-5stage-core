@@ -63,6 +63,9 @@ Verified with automated multi-suite self-checking testbenches and synthesizable 
 
 ```text
 rv32i-5stage-core/
+├── docs/
+│   ├── technical_audit.md          # Architecture, exception traps, cache FSM & gate synthesis
+│   └── portfolio_summary.md        # Qualcomm resume bullets, microarch metrics & interview guide
 ├── rtl/
 │   ├── core/
 │   │   ├── rv32i_types_pkg.sv      # Global opcodes, ALU ops, pipeline constants
@@ -92,6 +95,13 @@ rv32i-5stage-core/
     ├── synth.ys                    # Yosys open-source synthesis script
     └── yosys_synth.log             # Gate-level synthesis log & primitive cell breakdown
 ```
+
+---
+
+## Detailed Documentation
+
+- [Technical Audit & Architectural Specification](docs/technical_audit.md)
+- [Portfolio Summary & Qualcomm Interview Guide](docs/portfolio_summary.md)
 
 ---
 
