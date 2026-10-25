@@ -558,6 +558,17 @@ module tb_rv32i_top;
 
         // Wait for dcache_error trap or cache error state
         while (dcache_error !== 1'b1) @(posedge clk);
+
+        // Assert Architectural Exception Properties for Store Access Fault
+        if (trap_taken !== 1'b1) begin
+          $fatal(1, "[ASSERTION FAILED] Architectural trap_taken not asserted on store eviction error!");
+        end
+        if (trap_cause !== 32'd7) begin
+          $fatal(1, "[ASSERTION FAILED] Trap cause mismatch on store! Got: %0d (Expected: 7 CAUSE_STORE_ACCESS_FAULT)", trap_cause);
+        end
+        $display("    [PASSED] Store access fault architectural trap raised: trap_taken=1, trap_cause=7 (STORE_ACCESS_FAULT).");
+        $display("    [PASSED] Faulting instruction PC: 0x%08h | Faulting store address: 0x%08h", trap_epc, trap_val);
+
         @(posedge clk);
         // Verify victim line with 0x9000 (Tag 18) was NOT cleared or invalidated
         begin

@@ -164,6 +164,8 @@ Executed on macOS with **Icarus Verilog** and **GTKWave**:
     [PASSED] Speculative instruction flushed; destination register x30 protected (no data corruption).
     [PASSED] CPU redirected to TRAP_VECTOR (0x1E0) and safely resumed execution at Suite 3B.
 >>> [TEST 3B] Injecting SLVERR during Dirty Writeback at Burst Word 7...
+    [PASSED] Store access fault architectural trap raised: trap_taken=1, trap_cause=7 (STORE_ACCESS_FAULT).
+    [PASSED] Faulting instruction PC: 0x0000014c | Faulting store address: 0x0000b000
     [PASSED] D-Cache asserted cpu_error (dcache_error = 1); fault propagated to CPU.
     [PASSED] Cache entered S_EVICT_ERR; DIRTY line and data PRESERVED in cache!
     [PASSED] Zero data loss on failed eviction writeback (cache_data = 0xDEADBEEF).
